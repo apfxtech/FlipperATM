@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "lib/ATMlib.h"
-#include "flipperatm_icons.h"
+#include "atm_icons.h"
 
 #define ATM_TXT_MAGIC        "ATM1"
 #define ATM_TXT_CMD_ENTRY    "ENTRY"
@@ -22,24 +22,24 @@
 #define ATM_TXT_COMMENT      '#'
 #define ATM_TXT_SEPARATOR    ','
 
-#define ATM_TXT_OP_DB                 "DB"
-#define ATM_TXT_OP_NOTE               "NOTE"
-#define ATM_TXT_OP_DELAY              "DELAY"
-#define ATM_TXT_OP_STOP               "STOP"
-#define ATM_TXT_OP_RETURN             "RETURN"
-#define ATM_TXT_OP_GOTO               "GOTO"
-#define ATM_TXT_OP_REPEAT             "REPEAT"
-#define ATM_TXT_OP_SET_TEMPO          "SET_TEMPO"
-#define ATM_TXT_OP_ADD_TEMPO          "ADD_TEMPO"
-#define ATM_TXT_OP_SET_VOLUME         "SET_VOLUME"
-#define ATM_TXT_OP_VOLUME_SLIDE_ON    "VOLUME_SLIDE_ON"
-#define ATM_TXT_OP_VOLUME_SLIDE_OFF   "VOLUME_SLIDE_OFF"
-#define ATM_TXT_OP_SET_NOTE_CUT       "SET_NOTE_CUT"
-#define ATM_TXT_OP_NOTE_CUT_OFF       "NOTE_CUT_OFF"
-#define ATM_TXT_OP_SET_TRANSPOSITION  "SET_TRANSPOSITION"
-#define ATM_TXT_OP_TRANSPOSITION_OFF  "TRANSPOSITION_OFF"
-#define ATM_TXT_OP_GOTO_ADVANCED      "GOTO_ADVANCED"
-#define ATM_TXT_OP_SET_VIBRATO        "SET_VIBRATO"
+#define ATM_TXT_OP_DB                "DB"
+#define ATM_TXT_OP_NOTE              "NOTE"
+#define ATM_TXT_OP_DELAY             "DELAY"
+#define ATM_TXT_OP_STOP              "STOP"
+#define ATM_TXT_OP_RETURN            "RETURN"
+#define ATM_TXT_OP_GOTO              "GOTO"
+#define ATM_TXT_OP_REPEAT            "REPEAT"
+#define ATM_TXT_OP_SET_TEMPO         "SET_TEMPO"
+#define ATM_TXT_OP_ADD_TEMPO         "ADD_TEMPO"
+#define ATM_TXT_OP_SET_VOLUME        "SET_VOLUME"
+#define ATM_TXT_OP_VOLUME_SLIDE_ON   "VOLUME_SLIDE_ON"
+#define ATM_TXT_OP_VOLUME_SLIDE_OFF  "VOLUME_SLIDE_OFF"
+#define ATM_TXT_OP_SET_NOTE_CUT      "SET_NOTE_CUT"
+#define ATM_TXT_OP_NOTE_CUT_OFF      "NOTE_CUT_OFF"
+#define ATM_TXT_OP_SET_TRANSPOSITION "SET_TRANSPOSITION"
+#define ATM_TXT_OP_TRANSPOSITION_OFF "TRANSPOSITION_OFF"
+#define ATM_TXT_OP_GOTO_ADVANCED     "GOTO_ADVANCED"
+#define ATM_TXT_OP_SET_VIBRATO       "SET_VIBRATO"
 
 #define ATM_SONG_MAX_TEXT_SIZE (32 * 1024)
 
@@ -117,13 +117,18 @@ static bool atm_token_equals(const char* token, const char* keyword) {
     return (*token == '\0') && (*keyword == '\0');
 }
 
-static void atm_set_player_status(FlipperAtmApp* app, const char* file_name, const char* state, bool loaded) {
+static void atm_set_player_status(
+    FlipperAtmApp* app,
+    const char* file_name,
+    const char* state,
+    bool loaded) {
     with_view_model_cpp(
         app->player_view,
         AtmPlayerModel*,
         model,
         {
-            snprintf(model->file_name, sizeof(model->file_name), "%s", file_name ? file_name : "-");
+            snprintf(
+                model->file_name, sizeof(model->file_name), "%s", file_name ? file_name : "-");
             snprintf(model->state_line, sizeof(model->state_line), "%s", state ? state : "-");
             model->loaded = loaded;
         },
@@ -132,7 +137,8 @@ static void atm_set_player_status(FlipperAtmApp* app, const char* file_name, con
 
 static void atm_set_playback_state(FlipperAtmApp* app) {
     char short_name[48];
-    atm_extract_file_name(furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
+    atm_extract_file_name(
+        furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
 
     const char* state = "Stopped";
     if(app->playing) state = app->paused ? "Paused" : "Playing";
@@ -147,9 +153,8 @@ static void atm_extract_file_name(const char* path, char* out, size_t out_size) 
     snprintf(out, out_size, "%s", file);
 
     size_t len = strlen(out);
-    if(
-        len > 4 && out[len - 4] == '.' && atm_char_upper(out[len - 3]) == 'A' &&
-        atm_char_upper(out[len - 2]) == 'T' && atm_char_upper(out[len - 1]) == 'M') {
+    if(len > 4 && out[len - 4] == '.' && atm_char_upper(out[len - 3]) == 'A' &&
+       atm_char_upper(out[len - 2]) == 'T' && atm_char_upper(out[len - 1]) == 'M') {
         out[len - 4] = '\0';
     }
 }
@@ -205,7 +210,8 @@ static bool atm_next_token(AtmTokenizer* tz, char* token, size_t token_size) {
 
     while(*p) {
         if(*p == ATM_TXT_COMMENT) {
-            while(*p && *p != '\n') p++;
+            while(*p && *p != '\n')
+                p++;
             continue;
         }
 
@@ -377,9 +383,11 @@ static bool atm_parse_song_text(const char* text, uint8_t** out_buf, size_t* out
     size_t p = 0;
     bool ok = false;
 
-    if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_MAGIC)) goto out;
+    if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_MAGIC))
+        goto out;
 
-    if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_CMD_ENTRY)) goto out;
+    if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_CMD_ENTRY))
+        goto out;
     for(size_t i = 0; i < 4; i++) {
         if(!atm_parse_arg_i32(&tz, &value)) goto out;
         entry[i] = (uint8_t)(value & 0xFF);
@@ -456,7 +464,8 @@ static bool atm_load_song_from_file(FlipperAtmApp* app, const char* path) {
 
         uint8_t* compiled = NULL;
         size_t compiled_size = 0;
-        if(read_total == (size_t)file_size && atm_parse_song_text(text, &compiled, &compiled_size)) {
+        if(read_total == (size_t)file_size &&
+           atm_parse_song_text(text, &compiled, &compiled_size)) {
             if(app->song_buf) free(app->song_buf);
             app->song_buf = compiled;
             app->song_size = compiled_size;
@@ -547,7 +556,8 @@ static bool atm_custom_event_callback(void* context, uint32_t event) {
         }
 
         char short_name[48];
-        atm_extract_file_name(furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
+        atm_extract_file_name(
+            furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
 
         if(atm_load_song_from_file(app, furi_string_get_cstr(app->selected_path))) {
             ATM.play(app->song_buf);
@@ -614,13 +624,7 @@ extern "C" int32_t flipper_atm_app(void* p) {
 
     app->file_browser = file_browser_alloc(app->selected_path);
     file_browser_configure(
-        app->file_browser,
-        ".atm",
-        APP_ASSETS_PATH(""),
-        false,
-        true,
-        NULL,
-        true);
+        app->file_browser, ".atm", APP_ASSETS_PATH(""), false, true, NULL, true);
     file_browser_set_callback(app->file_browser, atm_file_selected_callback, app);
     file_browser_set_item_callback(app->file_browser, atm_file_browser_item_callback, app);
 
@@ -636,7 +640,8 @@ extern "C" int32_t flipper_atm_app(void* p) {
     view_dispatcher_set_custom_event_callback(app->dispatcher, atm_custom_event_callback);
     view_dispatcher_set_navigation_event_callback(app->dispatcher, atm_navigation_event_callback);
 
-    view_dispatcher_add_view(app->dispatcher, AtmViewBrowser, file_browser_get_view(app->file_browser));
+    view_dispatcher_add_view(
+        app->dispatcher, AtmViewBrowser, file_browser_get_view(app->file_browser));
     view_dispatcher_add_view(app->dispatcher, AtmViewPlayer, app->player_view);
     view_dispatcher_attach_to_gui(app->dispatcher, app->gui, ViewDispatcherTypeFullscreen);
 
