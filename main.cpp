@@ -15,6 +15,7 @@
 #include "atm_icons.h"
 
 #define ATM_TXT_MAGIC        "ATM1"
+#define ATM_TXT_CMD_NAME     "NAME"
 #define ATM_TXT_CMD_ENTRY    "ENTRY"
 #define ATM_TXT_CMD_TRACK    "TRACK"
 #define ATM_TXT_CMD_ENDTRACK "ENDTRACK"
@@ -42,6 +43,8 @@
 #define ATM_TXT_OP_SET_VIBRATO       "SET_VIBRATO"
 
 #define ATM_SONG_MAX_TEXT_SIZE (32 * 1024)
+#define ATM_VOLUME_UNIT_STEP 0.1f
+#define ATM_VOLUME_UNIT_MAX  8
 
 typedef enum {
     AtmViewBrowser = 0,
@@ -51,11 +54,13 @@ typedef enum {
 typedef enum {
     AtmEventFileSelected = 1,
     AtmEventOpenBrowser,
+    AtmEventUiTick,
 } AtmEvent;
 
 typedef struct {
-    char file_name[48];
+    char song_name[48];
     char state_line[24];
+    uint8_t levels[4];
     bool loaded;
 } AtmPlayerModel;
 
@@ -90,6 +95,11 @@ typedef struct {
     size_t song_size;
     bool playing;
     bool paused;
+    char song_name[48];
+    FuriTimer* ui_timer;
+    uint16_t ui_level_q8[4];
+    uint8_t ui_dither_phase;
+    int8_t volume_units;
 } FlipperAtmApp;
 
 static void atm_extract_file_name(const char* path, char* out, size_t out_size);
@@ -119,7 +129,7 @@ static bool atm_token_equals(const char* token, const char* keyword) {
 
 static void atm_set_player_status(
     FlipperAtmApp* app,
-    const char* file_name,
+    const char* song_name,
     const char* state,
     bool loaded) {
     with_view_model_cpp(
@@ -128,22 +138,76 @@ static void atm_set_player_status(
         model,
         {
             snprintf(
-                model->file_name, sizeof(model->file_name), "%s", file_name ? file_name : "-");
+                model->song_name, sizeof(model->song_name), "%s", song_name ? song_name : "-");
             snprintf(model->state_line, sizeof(model->state_line), "%s", state ? state : "-");
             model->loaded = loaded;
         },
         true);
 }
 
+static void atm_update_levels(FlipperAtmApp* app) {
+    uint8_t raw_levels[4] = {0, 0, 0, 0};
+    uint8_t smooth_widths[4] = {0, 0, 0, 0};
+    const uint16_t meter_max_level = 63;
+    const uint16_t meter_inner_w = 120;
+    atm_get_channel_levels(raw_levels);
+    raw_levels[3] = (uint8_t)(raw_levels[3] > 31 ? 63 : raw_levels[3] * 2);
+    app->ui_dither_phase++;
+
+    for(size_t i = 0; i < 4; i++) {
+        uint16_t target_q8 = (uint16_t)raw_levels[i] << 8;
+        uint16_t cur_q8 = app->ui_level_q8[i];
+
+        if(target_q8 >= cur_q8) {
+            cur_q8 = target_q8;
+        } else {
+            uint16_t delta = (uint16_t)(cur_q8 - target_q8);
+            uint16_t decay = (uint16_t)((delta >> 3) + 1);
+            cur_q8 = (cur_q8 > decay) ? (uint16_t)(cur_q8 - decay) : 0;
+        }
+
+        app->ui_level_q8[i] = cur_q8;
+
+        uint32_t w_q8 = ((uint32_t)cur_q8 * meter_inner_w) / meter_max_level;
+        uint8_t w = (uint8_t)(w_q8 >> 8);
+        uint8_t frac = (uint8_t)(w_q8 & 0xFF);
+
+        if(w < meter_inner_w && frac > app->ui_dither_phase) w++;
+        smooth_widths[i] = w;
+    }
+
+    with_view_model_cpp(
+        app->player_view,
+        AtmPlayerModel*,
+        model,
+        {
+            for(size_t i = 0; i < 4; i++) {
+                model->levels[i] = smooth_widths[i];
+            }
+        },
+        true);
+}
+
+static void atm_reset_ui_level_meters(FlipperAtmApp* app) {
+    memset(app->ui_level_q8, 0, sizeof(app->ui_level_q8));
+    app->ui_dither_phase = 0;
+}
+
 static void atm_set_playback_state(FlipperAtmApp* app) {
-    char short_name[48];
-    atm_extract_file_name(
-        furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
+    char state[24];
+    const char* base = "Stopped";
+    if(app->playing) base = app->paused ? "Paused" : "Playing";
+    snprintf(state, sizeof(state), "%s V%+d", base, (int)app->volume_units);
+    atm_set_player_status(app, app->song_name, state, app->song_buf != NULL);
+}
 
-    const char* state = "Stopped";
-    if(app->playing) state = app->paused ? "Paused" : "Playing";
+static void atm_apply_volume_units(FlipperAtmApp* app) {
+    if(app->volume_units > ATM_VOLUME_UNIT_MAX) app->volume_units = ATM_VOLUME_UNIT_MAX;
+    if(app->volume_units < -ATM_VOLUME_UNIT_MAX) app->volume_units = -ATM_VOLUME_UNIT_MAX;
 
-    atm_set_player_status(app, short_name, state, app->song_buf != NULL);
+    float gain = 1.0f + (float)app->volume_units * ATM_VOLUME_UNIT_STEP;
+    if(gain < 0.0f) gain = 0.0f;
+    ATM.setMasterVolume(gain);
 }
 
 static void atm_extract_file_name(const char* path, char* out, size_t out_size) {
@@ -251,6 +315,29 @@ static bool atm_parse_arg_i32(AtmTokenizer* tz, int32_t* out) {
     char token[32];
     if(!atm_next_token(tz, token, sizeof(token))) return false;
     return atm_parse_i32(token, out);
+}
+
+static bool atm_parse_name_line(AtmTokenizer* tz, char* out, size_t out_size) {
+    if(!out || out_size == 0) return false;
+
+    const char* p = tz->cur;
+    while(*p == ' ' || *p == '\t' || *p == ATM_TXT_SEPARATOR)
+        p++;
+
+    if(*p == '\0' || *p == '\n' || *p == '\r' || *p == ATM_TXT_COMMENT) return false;
+
+    size_t n = 0;
+    while(*p && *p != '\n' && *p != '\r' && *p != ATM_TXT_COMMENT) {
+        if((n + 1) < out_size) out[n++] = *p;
+        p++;
+    }
+
+    while(n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t' || out[n - 1] == ATM_TXT_SEPARATOR))
+        n--;
+    out[n] = '\0';
+
+    tz->cur = p;
+    return n > 0;
 }
 
 static bool atm_emit_instruction(AtmTokenizer* tz, const char* op, ByteBuffer* data) {
@@ -368,7 +455,12 @@ static bool atm_emit_instruction(AtmTokenizer* tz, const char* op, ByteBuffer* d
     return false;
 }
 
-static bool atm_parse_song_text(const char* text, uint8_t** out_buf, size_t* out_size) {
+static bool atm_parse_song_text(
+    const char* text,
+    uint8_t** out_buf,
+    size_t* out_size,
+    char* out_song_name,
+    size_t out_song_name_size) {
     AtmTokenizer tz = {.cur = text};
     char token[64];
 
@@ -382,11 +474,22 @@ static bool atm_parse_song_text(const char* text, uint8_t** out_buf, size_t* out
     size_t song_size = 0;
     size_t p = 0;
     bool ok = false;
+    char ignored_song_name[2] = {0};
+    char* song_name_dst = out_song_name ? out_song_name : ignored_song_name;
+    size_t song_name_dst_size = out_song_name ? out_song_name_size : sizeof(ignored_song_name);
+
+    if(song_name_dst_size > 0) song_name_dst[0] = '\0';
 
     if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_MAGIC))
         goto out;
 
-    if(!atm_next_token(&tz, token, sizeof(token)) || !atm_token_equals(token, ATM_TXT_CMD_ENTRY))
+    if(!atm_next_token(&tz, token, sizeof(token))) goto out;
+    if(atm_token_equals(token, ATM_TXT_CMD_NAME)) {
+        if(!atm_parse_name_line(&tz, song_name_dst, song_name_dst_size)) goto out;
+        if(!atm_next_token(&tz, token, sizeof(token))) goto out;
+    }
+
+    if(!atm_token_equals(token, ATM_TXT_CMD_ENTRY))
         goto out;
     for(size_t i = 0; i < 4; i++) {
         if(!atm_parse_arg_i32(&tz, &value)) goto out;
@@ -440,7 +543,11 @@ out:
     return ok;
 }
 
-static bool atm_load_song_from_file(FlipperAtmApp* app, const char* path) {
+static bool atm_load_song_from_file(
+    FlipperAtmApp* app,
+    const char* path,
+    char* out_song_name,
+    size_t out_song_name_size) {
     bool ok = false;
     File* file = storage_file_alloc(app->storage);
     if(!file) return false;
@@ -465,7 +572,7 @@ static bool atm_load_song_from_file(FlipperAtmApp* app, const char* path) {
         uint8_t* compiled = NULL;
         size_t compiled_size = 0;
         if(read_total == (size_t)file_size &&
-           atm_parse_song_text(text, &compiled, &compiled_size)) {
+           atm_parse_song_text(text, &compiled, &compiled_size, out_song_name, out_song_name_size)) {
             if(app->song_buf) free(app->song_buf);
             app->song_buf = compiled;
             app->song_size = compiled_size;
@@ -495,22 +602,39 @@ static void atm_open_browser(FlipperAtmApp* app) {
     view_dispatcher_switch_to_view(app->dispatcher, AtmViewBrowser);
 }
 
+static void atm_ui_timer_callback(void* context) {
+    FlipperAtmApp* app = (FlipperAtmApp*)context;
+    view_dispatcher_send_custom_event(app->dispatcher, AtmEventUiTick);
+}
+
 static void atm_player_draw_callback(Canvas* canvas, void* model_ptr) {
     AtmPlayerModel* model = (AtmPlayerModel*)model_ptr;
 
+    const uint8_t meter_x = 3;
+    const uint8_t meter_inner_w = 120;
+    const uint8_t meter_inner_h = 4;
+    const uint8_t meter_frame = 1;
+    const uint8_t meter_gap = 2;
+    const uint8_t meter_outer_w = meter_inner_w + (meter_frame * 2);
+    const uint8_t meter_outer_h = meter_inner_h + (meter_frame * 2);
+    const uint8_t meter_top = 34;
+
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 11, "FlipperATM");
+    canvas_draw_str(canvas, 2, 11, model->song_name);
 
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 24, "File:");
-    canvas_draw_str(canvas, 30, 24, model->file_name);
+    canvas_draw_str(canvas, 2, 17, model->state_line);
 
-    canvas_draw_str(canvas, 2, 36, "State:");
-    canvas_draw_str(canvas, 38, 36, model->state_line);
+    for(size_t i = 0; i < 4; i++) {
+        uint8_t w = model->levels[i];
+        if(w > meter_inner_w) w = meter_inner_w;
 
-    canvas_draw_str(canvas, 2, 49, "OK pause/resume");
-    canvas_draw_str(canvas, 2, 58, "Down stop, Back files");
+        const uint8_t y = (uint8_t)(meter_top + i * (meter_outer_h + meter_gap));
+
+        canvas_draw_frame(canvas, meter_x, y, meter_outer_w, meter_outer_h);
+        if(w) canvas_draw_box(canvas, (uint8_t)(meter_x + meter_frame), (uint8_t)(y + meter_frame), w, meter_inner_h);
+    }
 }
 
 static bool atm_player_input_callback(InputEvent* event, void* context) {
@@ -533,7 +657,23 @@ static bool atm_player_input_callback(InputEvent* event, void* context) {
             ATM.stop();
             app->playing = false;
             app->paused = false;
+            atm_reset_ui_level_meters(app);
+            atm_update_levels(app);
             atm_set_playback_state(app);
+            consumed = true;
+        } else if(event->key == InputKeyRight) {
+            if(app->volume_units < ATM_VOLUME_UNIT_MAX) {
+                app->volume_units++;
+                atm_apply_volume_units(app);
+                atm_set_playback_state(app);
+            }
+            consumed = true;
+        } else if(event->key == InputKeyLeft) {
+            if(app->volume_units > -ATM_VOLUME_UNIT_MAX) {
+                app->volume_units--;
+                atm_apply_volume_units(app);
+                atm_set_playback_state(app);
+            }
             consumed = true;
         }
     }
@@ -543,6 +683,11 @@ static bool atm_player_input_callback(InputEvent* event, void* context) {
 
 static bool atm_custom_event_callback(void* context, uint32_t event) {
     FlipperAtmApp* app = (FlipperAtmApp*)context;
+
+    if(event == AtmEventUiTick) {
+        atm_update_levels(app);
+        return true;
+    }
 
     if(event == AtmEventOpenBrowser) {
         atm_open_browser(app);
@@ -559,16 +704,30 @@ static bool atm_custom_event_callback(void* context, uint32_t event) {
         atm_extract_file_name(
             furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
 
-        if(atm_load_song_from_file(app, furi_string_get_cstr(app->selected_path))) {
+        char song_name[48] = {0};
+        if(atm_load_song_from_file(
+               app, furi_string_get_cstr(app->selected_path), song_name, sizeof(song_name))) {
+            snprintf(
+                app->song_name,
+                sizeof(app->song_name),
+                "%s",
+                song_name[0] ? song_name : short_name);
+            atm_reset_ui_level_meters(app);
+            app->volume_units = 0;
+            atm_apply_volume_units(app);
             ATM.play(app->song_buf);
             app->playing = true;
             app->paused = false;
-            atm_set_player_status(app, short_name, "Playing", true);
+            atm_set_playback_state(app);
         } else {
+            snprintf(app->song_name, sizeof(app->song_name), "%s", short_name);
+            atm_reset_ui_level_meters(app);
+            app->volume_units = 0;
+            atm_apply_volume_units(app);
             ATM.stop();
             app->playing = false;
             app->paused = false;
-            atm_set_player_status(app, short_name, "Load error", false);
+            atm_set_player_status(app, app->song_name, "Load error V+0", false);
         }
 
         app->current_view = AtmViewPlayer;
@@ -621,6 +780,9 @@ extern "C" int32_t flipper_atm_app(void* p) {
 
     app->selected_path = furi_string_alloc();
     furi_string_set_str(app->selected_path, APP_ASSETS_PATH("title.atm"));
+    snprintf(app->song_name, sizeof(app->song_name), "%s", "-");
+    app->volume_units = 0;
+    atm_reset_ui_level_meters(app);
 
     app->file_browser = file_browser_alloc(app->selected_path);
     file_browser_configure(
@@ -634,7 +796,14 @@ extern "C" int32_t flipper_atm_app(void* p) {
     view_set_draw_callback(app->player_view, atm_player_draw_callback);
     view_set_input_callback(app->player_view, atm_player_input_callback);
 
-    atm_set_player_status(app, "-", "Choose file", false);
+    atm_apply_volume_units(app);
+    atm_set_player_status(app, "-", "Choose file V+0", false);
+    atm_update_levels(app);
+
+    app->ui_timer = furi_timer_alloc(atm_ui_timer_callback, FuriTimerTypePeriodic, app);
+    if(app->ui_timer) {
+        furi_timer_start(app->ui_timer, furi_ms_to_ticks(33));
+    }
 
     view_dispatcher_set_event_callback_context(app->dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->dispatcher, atm_custom_event_callback);
@@ -653,6 +822,11 @@ extern "C" int32_t flipper_atm_app(void* p) {
 
     ATM.stop();
     atm_system_deinit();
+
+    if(app->ui_timer) {
+        furi_timer_stop(app->ui_timer);
+        furi_timer_free(app->ui_timer);
+    }
 
     if(app->browser_started) {
         file_browser_stop(app->file_browser);

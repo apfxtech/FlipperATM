@@ -47,6 +47,7 @@ void ATM_playroutine(void);
 void atm_system_init(void);
 void atm_system_deinit(void);
 void atm_set_enabled(uint8_t en);
+void atm_get_channel_levels(uint8_t out_levels[4]);
 
 class ATMsynth {
 public:
@@ -61,6 +62,7 @@ public:
     static void systemInit();
     static void systemDeinit();
     static void setEnabled(bool en);
+    static void setMasterVolume(float v);
 };
 
 extern ATMsynth ATM;

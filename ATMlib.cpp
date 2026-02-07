@@ -1,4 +1,5 @@
 #include "lib/ATMlib.h"
+#include "lib/Vol.h"
 
 #include <string.h>
 #include <furi.h>
@@ -67,6 +68,12 @@ struct ch_t {
 };
 
 static ch_t channel_state[4];
+static VolMeter channel_meters[4];
+static uint8_t channel_levels[4] = {0, 0, 0, 0};
+
+static inline uint8_t abs_i8_to_u8(int8_t v) {
+    return (uint8_t)(v < 0 ? -v : v);
+}
 
 static uint16_t read_vle(const uint8_t** pp) {
     uint16_t q = 0;
@@ -107,6 +114,7 @@ static uint32_t dma_buf[ATM_DMA_TOTAL];
 static bool atm_running = false;
 static bool atm_paused = false;
 static float atm_master_volume = 1.0f;
+static constexpr float ATM_MASTER_GAIN_MAX = 2.0f;
 
 static uint32_t atm_tick_div = 0;
 static uint32_t atm_tick_acc = 0;
@@ -124,17 +132,18 @@ static inline uint8_t atm_render_logical_sample_u8() {
     if(phase2 < 0) phase2 = (int8_t)(~phase2);
     phase2 = (int8_t)(phase2 << 1);
     phase2 = (int8_t)(phase2 - 128);
-    int8_t vol = (int8_t)((((int16_t)phase2 * (int8_t)osc[2].vol) << 1) >> 8);
+    int8_t c2 = (int8_t)((((int16_t)phase2 * (int8_t)osc[2].vol) << 1) >> 8);
+    int8_t vol = c2;
 
     osc[0].phase = (uint16_t)(osc[0].phase + osc[0].freq);
-    int8_t vol0 = (int8_t)osc[0].vol;
-    if(osc[0].phase >= 0xC000) vol0 = (int8_t)(-vol0);
-    vol = (int8_t)(vol + vol0);
+    int8_t c0 = (int8_t)osc[0].vol;
+    if(osc[0].phase >= 0xC000) c0 = (int8_t)(-c0);
+    vol = (int8_t)(vol + c0);
 
     osc[1].phase = (uint16_t)(osc[1].phase + osc[1].freq);
-    int8_t vol1 = (int8_t)osc[1].vol;
-    if(osc[1].phase & 0x8000) vol1 = (int8_t)(-vol1);
-    vol = (int8_t)(vol + vol1);
+    int8_t c1 = (int8_t)osc[1].vol;
+    if(osc[1].phase & 0x8000) c1 = (int8_t)(-c1);
+    vol = (int8_t)(vol + c1);
 
     uint16_t freq = osc[3].freq;
     freq <<= 1;
@@ -142,14 +151,22 @@ static inline uint8_t atm_render_logical_sample_u8() {
     if(freq & 0x4000) freq ^= 1;
     osc[3].freq = freq;
 
-    int8_t vol3 = (int8_t)osc[3].vol;
-    if(freq & 0x8000) vol3 = (int8_t)(-vol3);
-    vol = (int8_t)(vol + vol3);
+    int8_t c3 = (int8_t)osc[3].vol;
+    if(freq & 0x8000) c3 = (int8_t)(-c3);
+    vol = (int8_t)(vol + c3);
+
+    channel_levels[0] = vol_meter_step(&channel_meters[0], abs_i8_to_u8(c0));
+    channel_levels[1] = vol_meter_step(&channel_meters[1], abs_i8_to_u8(c1));
+    channel_levels[2] = vol_meter_step(&channel_meters[2], abs_i8_to_u8(c2));
+    channel_levels[3] = vol_meter_step(&channel_meters[3], abs_i8_to_u8(c3));
 
     int16_t out = (int16_t)vol + (int16_t)pcm;
 
     float centered = (float)(out - 128);
     centered *= atm_master_volume;
+    if(centered > 127.0f) centered = 127.0f;
+    if(centered < -127.0f) centered = -127.0f;
+
     int16_t outv = (int16_t)(128.0f + centered);
     if(outv < 0) outv = 0;
     if(outv > 255) outv = 255;
@@ -613,6 +630,10 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 }
 
                 memset(channel_state, 0, sizeof(channel_state));
+                memset(channel_levels, 0, sizeof(channel_levels));
+                for(uint8_t i = 0; i < 4; i++) {
+                    vol_meter_reset(&channel_meters[i]);
+                }
                 ChannelActiveMute = 0b11110000;
                 continue;
             }
@@ -628,6 +649,10 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 }
 
                 memset(channel_state, 0, sizeof(channel_state));
+                memset(channel_levels, 0, sizeof(channel_levels));
+                for(uint8_t i = 0; i < 4; i++) {
+                    vol_meter_reset(&channel_meters[i]);
+                }
                 ChannelActiveMute = 0b11110000;
                 break;
             }
@@ -650,7 +675,7 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
             if(cmd.type == AtmCmdSetVolume) {
                 float v = cmd.u.vol.v;
                 if(v < 0) v = 0;
-                if(v > 1) v = 1;
+                if(v > ATM_MASTER_GAIN_MAX) v = ATM_MASTER_GAIN_MAX;
                 atm_master_volume = v;
                 continue;
             }
@@ -659,6 +684,10 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 const uint8_t* song = cmd.u.play.song;
 
                 memset(channel_state, 0, sizeof(channel_state));
+                memset(channel_levels, 0, sizeof(channel_levels));
+                for(uint8_t i = 0; i < 4; i++) {
+                    vol_meter_reset(&channel_meters[i]);
+                }
                 ChannelActiveMute = 0b11110000;
 
                 tickRate = 25;
@@ -789,6 +818,13 @@ void ATMsynth::setEnabled(bool en) {
     __atomic_store_n(&atm_audio_enabled, en ? 1 : 0, __ATOMIC_RELAXED);
 }
 
+void ATMsynth::setMasterVolume(float v) {
+    AtmCmd c{};
+    c.type = AtmCmdSetVolume;
+    c.u.vol.v = v;
+    push_cmd(c);
+}
+
 void atm_system_init(void) {
     ATMsynth::systemInit();
 }
@@ -797,4 +833,11 @@ void atm_system_deinit(void) {
 }
 void atm_set_enabled(uint8_t en) {
     ATMsynth::setEnabled(en != 0);
+}
+
+void atm_get_channel_levels(uint8_t out_levels[4]) {
+    if(!out_levels) return;
+    for(uint8_t i = 0; i < 4; i++) {
+        out_levels[i] = __atomic_load_n(&channel_levels[i], __ATOMIC_RELAXED);
+    }
 }
