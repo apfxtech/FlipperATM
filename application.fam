@@ -6,10 +6,11 @@ App(
     requires=["gui"],
     stack_size=6 * 1024,
     fap_category="Media",
-    fap_author="@apfxtech",
     fap_version="1.0",
     fap_description="ATM music player from Arduventure.",
     fap_icon_assets="assets",
     fap_file_assets="assets",
     fap_icon="icon.png",
+    fap_author="@apfxtech",
+    fap_weburl="https://github.com/apfxtech/FlipperATM",
 )
