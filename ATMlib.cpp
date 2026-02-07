@@ -69,7 +69,6 @@ struct ch_t {
 
 static ch_t channel_state[4];
 static VolMeter channel_meters[4];
-static uint8_t channel_levels[4] = {0, 0, 0, 0};
 
 static inline uint8_t abs_i8_to_u8(int8_t v) {
     return (uint8_t)(v < 0 ? -v : v);
@@ -113,8 +112,8 @@ static uint32_t dma_buf[ATM_DMA_TOTAL];
 
 static bool atm_running = false;
 static bool atm_paused = false;
-static float atm_master_volume = 1.0f;
 static constexpr float ATM_MASTER_GAIN_MAX = 2.0f;
+static uint16_t atm_master_gain_q8 = 256;
 
 static uint32_t atm_tick_div = 0;
 static uint32_t atm_tick_acc = 0;
@@ -125,6 +124,7 @@ static FuriMessageQueue* atm_cmd_q = NULL;
 static void dma_isr(void* ctx);
 
 static uint8_t atm_audio_enabled = 1;
+static uint32_t channel_levels_packed = 0;
 
 static inline uint8_t atm_render_logical_sample_u8() {
     osc[2].phase = (uint16_t)(osc[2].phase + osc[2].freq);
@@ -155,17 +155,22 @@ static inline uint8_t atm_render_logical_sample_u8() {
     if(freq & 0x8000) c3 = (int8_t)(-c3);
     mix += c3;
 
-    channel_levels[0] = vol_meter_step(&channel_meters[0], abs_i8_to_u8(c0));
-    channel_levels[1] = vol_meter_step(&channel_meters[1], abs_i8_to_u8(c1));
-    channel_levels[2] = vol_meter_step(&channel_meters[2], abs_i8_to_u8(c2));
-    channel_levels[3] = vol_meter_step(&channel_meters[3], abs_i8_to_u8(c3));
+    const uint8_t l0 = vol_meter_step(&channel_meters[0], abs_i8_to_u8(c0));
+    const uint8_t l1 = vol_meter_step(&channel_meters[1], abs_i8_to_u8(c1));
+    const uint8_t l2 = vol_meter_step(&channel_meters[2], abs_i8_to_u8(c2));
+    const uint8_t l3 = vol_meter_step(&channel_meters[3], abs_i8_to_u8(c3));
+    const uint32_t packed =
+        (uint32_t)l0 | ((uint32_t)l1 << 8) | ((uint32_t)l2 << 16) | ((uint32_t)l3 << 24);
+    __atomic_store_n(&channel_levels_packed, packed, __ATOMIC_RELAXED);
 
-    float centered = (float)mix;
-    centered *= atm_master_volume;
-    if(centered > 127.0f) centered = 127.0f;
-    if(centered < -127.0f) centered = -127.0f;
+    const uint16_t gain_q8 = __atomic_load_n(&atm_master_gain_q8, __ATOMIC_RELAXED);
 
-    int16_t outv = (int16_t)(128.0f + centered);
+    // Keep 6 dB headroom for 4-channel summing at unity gain, then apply master gain.
+    int32_t centered = ((int32_t)mix * (int32_t)gain_q8) >> 9;
+    if(centered > 127) centered = 127;
+    if(centered < -127) centered = -127;
+
+    int16_t outv = (int16_t)(128 + centered);
     if(outv < 0) outv = 0;
     if(outv > 255) outv = 255;
 
@@ -628,7 +633,7 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 }
 
                 memset(channel_state, 0, sizeof(channel_state));
-                memset(channel_levels, 0, sizeof(channel_levels));
+                __atomic_store_n(&channel_levels_packed, 0, __ATOMIC_RELAXED);
                 for(uint8_t i = 0; i < 4; i++) {
                     vol_meter_reset(&channel_meters[i]);
                 }
@@ -647,7 +652,7 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 }
 
                 memset(channel_state, 0, sizeof(channel_state));
-                memset(channel_levels, 0, sizeof(channel_levels));
+                __atomic_store_n(&channel_levels_packed, 0, __ATOMIC_RELAXED);
                 for(uint8_t i = 0; i < 4; i++) {
                     vol_meter_reset(&channel_meters[i]);
                 }
@@ -674,7 +679,8 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 float v = cmd.u.vol.v;
                 if(v < 0) v = 0;
                 if(v > ATM_MASTER_GAIN_MAX) v = ATM_MASTER_GAIN_MAX;
-                atm_master_volume = v;
+                uint16_t q8 = (uint16_t)(v * 256.0f + 0.5f);
+                __atomic_store_n(&atm_master_gain_q8, q8, __ATOMIC_RELAXED);
                 continue;
             }
 
@@ -682,7 +688,7 @@ static int32_t atm_thread_fn(void* /*ctx*/) {
                 const uint8_t* song = cmd.u.play.song;
 
                 memset(channel_state, 0, sizeof(channel_state));
-                memset(channel_levels, 0, sizeof(channel_levels));
+                __atomic_store_n(&channel_levels_packed, 0, __ATOMIC_RELAXED);
                 for(uint8_t i = 0; i < 4; i++) {
                     vol_meter_reset(&channel_meters[i]);
                 }
@@ -835,7 +841,9 @@ void atm_set_enabled(uint8_t en) {
 
 void atm_get_channel_levels(uint8_t out_levels[4]) {
     if(!out_levels) return;
-    for(uint8_t i = 0; i < 4; i++) {
-        out_levels[i] = __atomic_load_n(&channel_levels[i], __ATOMIC_RELAXED);
-    }
+    const uint32_t packed = __atomic_load_n(&channel_levels_packed, __ATOMIC_RELAXED);
+    out_levels[0] = (uint8_t)(packed & 0xFF);
+    out_levels[1] = (uint8_t)((packed >> 8) & 0xFF);
+    out_levels[2] = (uint8_t)((packed >> 16) & 0xFF);
+    out_levels[3] = (uint8_t)((packed >> 24) & 0xFF);
 }

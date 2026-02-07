@@ -44,7 +44,7 @@
 
 #define ATM_SONG_MAX_TEXT_SIZE (32 * 1024)
 #define ATM_VOLUME_UNIT_STEP 0.1f
-#define ATM_VOLUME_UNIT_MAX  5
+#define ATM_VOLUME_UNIT_MAX  8
 
 typedef enum {
     AtmViewBrowser = 0,
