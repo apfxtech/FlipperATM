@@ -133,17 +133,17 @@ static inline uint8_t atm_render_logical_sample_u8() {
     phase2 = (int8_t)(phase2 << 1);
     phase2 = (int8_t)(phase2 - 128);
     int8_t c2 = (int8_t)((((int16_t)phase2 * (int8_t)osc[2].vol) << 1) >> 8);
-    int8_t vol = c2;
+    int16_t mix = c2;
 
     osc[0].phase = (uint16_t)(osc[0].phase + osc[0].freq);
     int8_t c0 = (int8_t)osc[0].vol;
     if(osc[0].phase >= 0xC000) c0 = (int8_t)(-c0);
-    vol = (int8_t)(vol + c0);
+    mix += c0;
 
     osc[1].phase = (uint16_t)(osc[1].phase + osc[1].freq);
     int8_t c1 = (int8_t)osc[1].vol;
     if(osc[1].phase & 0x8000) c1 = (int8_t)(-c1);
-    vol = (int8_t)(vol + c1);
+    mix += c1;
 
     uint16_t freq = osc[3].freq;
     freq <<= 1;
@@ -153,16 +153,14 @@ static inline uint8_t atm_render_logical_sample_u8() {
 
     int8_t c3 = (int8_t)osc[3].vol;
     if(freq & 0x8000) c3 = (int8_t)(-c3);
-    vol = (int8_t)(vol + c3);
+    mix += c3;
 
     channel_levels[0] = vol_meter_step(&channel_meters[0], abs_i8_to_u8(c0));
     channel_levels[1] = vol_meter_step(&channel_meters[1], abs_i8_to_u8(c1));
     channel_levels[2] = vol_meter_step(&channel_meters[2], abs_i8_to_u8(c2));
     channel_levels[3] = vol_meter_step(&channel_meters[3], abs_i8_to_u8(c3));
 
-    int16_t out = (int16_t)vol + (int16_t)pcm;
-
-    float centered = (float)(out - 128);
+    float centered = (float)mix;
     centered *= atm_master_volume;
     if(centered > 127.0f) centered = 127.0f;
     if(centered < -127.0f) centered = -127.0f;
