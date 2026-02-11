@@ -123,6 +123,20 @@ static char atm_char_upper(char c) {
     return c;
 }
 
+static bool atm_str_contains_ci(const char* haystack, const char* needle) {
+    if(!haystack || !needle || !needle[0]) return false;
+    for(const char* h = haystack; *h; h++) {
+        const char* hp = h;
+        const char* np = needle;
+        while(*hp && *np && atm_char_upper(*hp) == atm_char_upper(*np)) {
+            hp++;
+            np++;
+        }
+        if(*np == '\0') return true;
+    }
+    return false;
+}
+
 static bool atm_token_equals(const char* token, const char* keyword) {
     while(*token && *keyword) {
         if(atm_char_upper(*token) != atm_char_upper(*keyword)) return false;
@@ -159,7 +173,7 @@ static void atm_update_levels(FlipperAtmApp* app) {
     const uint16_t meter_max_level = 63;
     const uint16_t meter_inner_w = 120;
     atm_get_channel_levels(raw_levels);
-    raw_levels[3] = (uint8_t)(raw_levels[3] > 31 ? 63 : raw_levels[3] * 2);
+    // raw_levels[3] = (uint8_t)(raw_levels[3] > 31 ? 63 : raw_levels[3] * 2);
     app->ui_dither_phase++;
 
     for(size_t i = 0; i < 4; i++) {
@@ -608,14 +622,15 @@ static bool atm_load_song_from_file(
 }
 
 static bool atm_play_selected_file(FlipperAtmApp* app) {
+    const char* selected_path = furi_string_get_cstr(app->selected_path);
     char short_name[48];
-    atm_extract_file_name(furi_string_get_cstr(app->selected_path), short_name, sizeof(short_name));
+    atm_extract_file_name(selected_path, short_name, sizeof(short_name));
 
     char song_name[48] = {0};
-    if(atm_load_song_from_file(
-           app, furi_string_get_cstr(app->selected_path), song_name, sizeof(song_name))) {
+    if(atm_load_song_from_file(app, selected_path, song_name, sizeof(song_name))) {
         snprintf(app->song_name, sizeof(app->song_name), "%s", song_name[0] ? song_name : short_name);
         atm_reset_ui_level_meters(app);
+        ATM.setUniformToneMode(atm_str_contains_ci(selected_path, "blheli32"));
         ATM.play(app->song_buf);
         app->playing = true;
         app->paused = false;
